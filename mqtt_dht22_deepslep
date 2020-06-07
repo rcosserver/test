@@ -1,0 +1,206 @@
+#include <ArduinoJson.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+#include <PubSubClient.h>
+#include <DHT.h>
+
+
+#define DHTTYPE DHT22
+#define DHTPIN  4
+#define wifi_ssid "xxxxxxxx"
+#define wifi_password "xxxxxxx"
+#define mqtt_server "m12.cloudmqtt.com"
+#define mqtt_user "xxxxxxxxx"
+#define mqtt_password "xxxxxxxxxxxxx"
+#define mqtt_port "14285"
+#define dth_topic "sensors/DHT22"
+#define device_status_topic "sensors/DHT22/status"
+#define humidity_topic "sensors/DHT22/Humidity"  
+#define temperature_topic "sensors/DHT22/Temperature"  
+#define DEBUG true
+#define Serial if(DEBUG)Serial
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+DHT dht(DHTPIN, DHTTYPE, 11); // 11 works fine for ESP8266
+
+
+float humidity, temp_f;  // Values read from sensor
+// Time to sleep (in seconds):
+const int sleepTimeS = 120; //120 seconds
+
+
+/********************************************************************
+* FunctionName: gettemperature                                          
+* Description : Read temperature and humidity from sensor
+*               Values are stored in humidity and temp_f   
+* Parameters  : None                             
+* Returns     : None                                                     
+*********************************************************************/
+
+void gettemperature() 
+{
+  int runs=0;
+  do {
+       delay(2000);
+       temp_f = dht.readTemperature();     
+       humidity = dht.readHumidity();          
+
+       if(runs > 0)
+           Serial.println("##Failed to read from DHT sensor! ###");
+       Serial.println(String(temp_f ).c_str());
+       client.publish(temperature_topic, String(temp_f).c_str(), true);         
+       Serial.println(String(humidity ).c_str());
+       client.publish(humidity_topic, String(humidity).c_str(), true);  
+       runs++;
+    }
+    while(isnan(temp_f) && isnan(humidity));
+}
+
+/********************************************************************
+* FunctionName: setup_wifi                                          
+* Description : Setup wifi network   
+* Parameters  : None                             
+* Returns     : None                                                     
+*********************************************************************/
+
+void setup_wifi() {
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(wifi_ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(wifi_ssid, wifi_password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+/********************************************************************
+* FunctionName: reconnect                                          
+* Description : Reconnect to the wifi network in case the connection
+*               is lost  
+* Parameters  : None                             
+* Returns     : None                                                     
+*********************************************************************/
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) 
+  {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    // If you do not want to use a username and password, change next line to
+    // if (client.connect("ESP8266Client")) {
+    if (client.connect("nodemcu", mqtt_user, mqtt_password)) {
+      Serial.println("connected");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+/********************************************************************
+* FunctionName: setup                                          
+* Description : SETUP function  
+* Parameters  : None                             
+* Returns     : None                                                     
+*********************************************************************/
+
+void setup() 
+{
+  Serial.begin(115200);
+  char dev_name[50];  
+/*
+  Serial.println( "Booting" );
+  Serial.println();
+  Serial.printf( "Sketch size: %u\n", ESP.getSketchSize() );
+  Serial.printf( "Free size: %u\n", ESP.getFreeSketchSpace() );
+  Serial.printf( "Heap: %u\n", ESP.getFreeHeap() );
+  Serial.printf( "Boot Vers: %u\n", ESP.getBootVersion() );
+  Serial.printf( "CPU: %uMHz\n", ESP.getCpuFreqMHz() );
+  Serial.printf( "SDK: %s\n", ESP.getSdkVersion() );
+  Serial.printf( "Chip ID: %u\n", ESP.getChipId() );
+  Serial.printf( "Flash ID: %u\n", ESP.getFlashChipId() );
+  Serial.printf( "Flash Size: %u\n", ESP.getFlashChipRealSize() );
+  Serial.printf( "Vcc: %u\n", ESP.getVcc() );
+  Serial.println();
+*/
+  char json_buffer[512];
+  char json_buffer_status[512];
+  char my_ip_s[16];
+
+  //this one is static allocation
+  StaticJsonBuffer<512> jsonBuffer;
+  JsonObject& root = jsonBuffer.createObject(); 
+
+  //This one is dynamic one (just for fun). Avoid this in embeded system
+  //Can be changed to Static one like: StaticJsonBuffer<512> jsonDeviceStatus;
+  DynamicJsonBuffer jsonDeviceStatus;
+  JsonObject& jsondeviceStatus = jsonDeviceStatus.createObject();
+  
+  sprintf(dev_name, "ESP_%d", ESP.getChipId());
+
+  setup_wifi();
+  client.setServer(mqtt_server, 14285);
+  client.connect(dev_name, mqtt_user, mqtt_password);
+  
+  if (!client.connected()) 
+  {
+    reconnect();
+  }
+  client.loop();
+
+  IPAddress my_ip_addr = WiFi.localIP();
+  sprintf(my_ip_s, "%d.%d.%d.%d",   my_ip_addr[0],my_ip_addr[1],my_ip_addr[2],my_ip_addr[3]);
+  jsondeviceStatus ["device_name"] = dev_name;
+  jsondeviceStatus["type"] = "dth"; 
+  jsondeviceStatus["ipaddress"] = String(my_ip_s).c_str();
+  jsondeviceStatus["bgn"] = 3;
+  jsondeviceStatus["sdk"] = ESP.getSdkVersion();
+  jsondeviceStatus["version"] = "1";
+  jsondeviceStatus["uptime"] = 0;
+  
+  jsondeviceStatus.printTo(json_buffer_status, sizeof(json_buffer_status));  
+  client.publish(device_status_topic, json_buffer_status , false);
+  Serial.println(json_buffer_status);
+
+
+
+  gettemperature();
+  String hum;
+  hum = String(humidity ).c_str();  
+  root["device_name"] = dev_name;
+  root["type"] = "dth";  
+  root["temperature"] = String(temp_f).c_str();
+  root["humidity"]    = hum; 
+  root.printTo(json_buffer, sizeof(json_buffer));  
+  client.publish(dth_topic, json_buffer , false);
+
+  Serial.println("Go to sleep!!!!");
+  // deepSleep time is defined in microseconds. Multiply
+  // seconds by 1e6 
+  ESP.deepSleep(sleepTimeS * 1000000); //
+}
+
+
+/********************************************************************
+* FunctionName: loop                                          
+* Description : LOOP function  
+* Parameters  : None                             
+* Returns     : None                                                     
+*********************************************************************/
+void loop() {}
